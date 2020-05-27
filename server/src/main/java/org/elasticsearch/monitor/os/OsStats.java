@@ -19,7 +19,8 @@
 
 package org.elasticsearch.monitor.os;
 
-import org.elasticsearch.Version;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.io.stream.Writeable;
@@ -225,17 +226,23 @@ public class OsStats implements Writeable, ToXContentFragment {
 
     public static class Mem implements Writeable, ToXContentFragment {
 
+        private static final Logger logger = LogManager.getLogger(Mem.class);
+
         private final long total;
         private final long free;
 
         public Mem(long total, long free) {
+            assert total >= 0 : "expected total memory to be positive, got: " + total;
+            assert free >= 0 : "expected free memory to be positive, got: " + total;
             this.total = total;
             this.free = free;
         }
 
         public Mem(StreamInput in) throws IOException {
             this.total = in.readLong();
+            assert total >= 0 : "expected total memory to be positive, got: " + total;
             this.free = in.readLong();
+            assert free >= 0 : "expected free memory to be positive, got: " + total;
         }
 
         @Override
@@ -249,6 +256,16 @@ public class OsStats implements Writeable, ToXContentFragment {
         }
 
         public ByteSizeValue getUsed() {
+            if (total == 0) {
+                // The work in https://github.com/elastic/elasticsearch/pull/42725 established that total memory
+                // can be reported as negative in some cases. In those cases, we force it to zero in which case
+                // we can no longer correctly report the used memory as (total-free) and should report it as zero.
+                //
+                // We intentionally check for (total == 0) rather than (total - free < 0) so as not to hide
+                // cases where (free > total) which would be a different bug.
+                logger.warn("cannot compute used memory when total memory is 0 and free memory is " + free);
+                return new ByteSizeValue(0);
+            }
             return new ByteSizeValue(total - free);
         }
 
@@ -413,15 +430,9 @@ public class OsStats implements Writeable, ToXContentFragment {
             cpuCfsPeriodMicros = in.readLong();
             cpuCfsQuotaMicros = in.readLong();
             cpuStat = new CpuStat(in);
-            if (in.getVersion().onOrAfter(Version.V_6_1_0)) {
-                memoryControlGroup = in.readOptionalString();
-                memoryLimitInBytes = in.readOptionalString();
-                memoryUsageInBytes = in.readOptionalString();
-            } else {
-                memoryControlGroup = null;
-                memoryLimitInBytes = null;
-                memoryUsageInBytes = null;
-            }
+            memoryControlGroup = in.readOptionalString();
+            memoryLimitInBytes = in.readOptionalString();
+            memoryUsageInBytes = in.readOptionalString();
         }
 
         @Override
@@ -432,11 +443,9 @@ public class OsStats implements Writeable, ToXContentFragment {
             out.writeLong(cpuCfsPeriodMicros);
             out.writeLong(cpuCfsQuotaMicros);
             cpuStat.writeTo(out);
-            if (out.getVersion().onOrAfter(Version.V_6_1_0)) {
-                out.writeOptionalString(memoryControlGroup);
-                out.writeOptionalString(memoryLimitInBytes);
-                out.writeOptionalString(memoryUsageInBytes);
-            }
+            out.writeOptionalString(memoryControlGroup);
+            out.writeOptionalString(memoryLimitInBytes);
+            out.writeOptionalString(memoryUsageInBytes);
         }
 
         @Override

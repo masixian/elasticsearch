@@ -19,7 +19,9 @@
 package org.elasticsearch.search.aggregations.bucket.sampler;
 
 import org.apache.lucene.index.LeafReaderContext;
+import org.apache.lucene.search.DiversifiedTopDocsCollector;
 import org.apache.lucene.search.ScoreMode;
+import org.apache.lucene.util.RamUsageEstimator;
 import org.elasticsearch.common.ParseField;
 import org.elasticsearch.common.lease.Releasables;
 import org.elasticsearch.common.xcontent.LoggingDeprecationHandler;
@@ -31,13 +33,11 @@ import org.elasticsearch.search.aggregations.LeafBucketCollector;
 import org.elasticsearch.search.aggregations.bucket.DeferableBucketAggregator;
 import org.elasticsearch.search.aggregations.bucket.DeferringBucketCollector;
 import org.elasticsearch.search.aggregations.bucket.SingleBucketAggregator;
-import org.elasticsearch.search.aggregations.pipeline.PipelineAggregator;
 import org.elasticsearch.search.aggregations.support.ValuesSource;
 import org.elasticsearch.search.internal.SearchContext;
 
 import java.io.IOException;
 import java.util.Arrays;
-import java.util.List;
 import java.util.Map;
 
 /**
@@ -56,16 +56,17 @@ public class SamplerAggregator extends DeferableBucketAggregator implements Sing
     public static final ParseField MAX_DOCS_PER_VALUE_FIELD = new ParseField("max_docs_per_value");
     public static final ParseField EXECUTION_HINT_FIELD = new ParseField("execution_hint");
 
+    static final long SCOREDOCKEY_SIZE = RamUsageEstimator.shallowSizeOfInstance(DiversifiedTopDocsCollector.ScoreDocKey.class);
+
     public enum ExecutionMode {
 
         MAP(new ParseField("map")) {
 
             @Override
             Aggregator create(String name, AggregatorFactories factories, int shardSize, int maxDocsPerValue, ValuesSource valuesSource,
-                    SearchContext context, Aggregator parent, List<PipelineAggregator> pipelineAggregators,
-                    Map<String, Object> metaData) throws IOException {
+                    SearchContext context, Aggregator parent, Map<String, Object> metadata) throws IOException {
 
-                return new DiversifiedMapSamplerAggregator(name, shardSize, factories, context, parent, pipelineAggregators, metaData,
+                return new DiversifiedMapSamplerAggregator(name, shardSize, factories, context, parent, metadata,
                         valuesSource,
                         maxDocsPerValue);
             }
@@ -80,11 +81,9 @@ public class SamplerAggregator extends DeferableBucketAggregator implements Sing
 
             @Override
             Aggregator create(String name, AggregatorFactories factories, int shardSize, int maxDocsPerValue, ValuesSource valuesSource,
-                    SearchContext context, Aggregator parent, List<PipelineAggregator> pipelineAggregators,
-                    Map<String, Object> metaData) throws IOException {
+                    SearchContext context, Aggregator parent, Map<String, Object> metadata) throws IOException {
 
-                return new DiversifiedBytesHashSamplerAggregator(name, shardSize, factories, context, parent, pipelineAggregators,
-                        metaData,
+                return new DiversifiedBytesHashSamplerAggregator(name, shardSize, factories, context, parent, metadata,
                         valuesSource,
                         maxDocsPerValue);
             }
@@ -99,9 +98,8 @@ public class SamplerAggregator extends DeferableBucketAggregator implements Sing
 
             @Override
             Aggregator create(String name, AggregatorFactories factories, int shardSize, int maxDocsPerValue, ValuesSource valuesSource,
-                    SearchContext context, Aggregator parent, List<PipelineAggregator> pipelineAggregators,
-                    Map<String, Object> metaData) throws IOException {
-                return new DiversifiedOrdinalsSamplerAggregator(name, shardSize, factories, context, parent, pipelineAggregators, metaData,
+                    SearchContext context, Aggregator parent, Map<String, Object> metadata) throws IOException {
+                return new DiversifiedOrdinalsSamplerAggregator(name, shardSize, factories, context, parent, metadata,
                         (ValuesSource.Bytes.WithOrdinals.FieldData) valuesSource, maxDocsPerValue);
             }
 
@@ -128,8 +126,7 @@ public class SamplerAggregator extends DeferableBucketAggregator implements Sing
         }
 
         abstract Aggregator create(String name, AggregatorFactories factories, int shardSize, int maxDocsPerValue,
-                ValuesSource valuesSource, SearchContext context, Aggregator parent, List<PipelineAggregator> pipelineAggregators,
-                Map<String, Object> metaData) throws IOException;
+                ValuesSource valuesSource, SearchContext context, Aggregator parent, Map<String, Object> metadata) throws IOException;
 
         abstract boolean needsGlobalOrdinals();
 
@@ -144,9 +141,10 @@ public class SamplerAggregator extends DeferableBucketAggregator implements Sing
     protected BestDocsDeferringCollector bdd;
 
     SamplerAggregator(String name, int shardSize, AggregatorFactories factories, SearchContext context,
-            Aggregator parent, List<PipelineAggregator> pipelineAggregators, Map<String, Object> metaData) throws IOException {
-        super(name, factories, context, parent, pipelineAggregators, metaData);
-        this.shardSize = shardSize;
+            Aggregator parent, Map<String, Object> metadata) throws IOException {
+        super(name, factories, context, parent, metadata);
+        // Make sure we do not allow size > maxDoc, to prevent accidental OOM
+        this.shardSize = Math.min(shardSize, context.searcher().getIndexReader().maxDoc());
     }
 
     @Override
@@ -156,7 +154,7 @@ public class SamplerAggregator extends DeferableBucketAggregator implements Sing
 
     @Override
     public DeferringBucketCollector getDeferringCollector() {
-        bdd = new BestDocsDeferringCollector(shardSize, context.bigArrays());
+        bdd = new BestDocsDeferringCollector(shardSize, context.bigArrays(), this::addRequestCircuitBreakerBytes);
         return bdd;
     }
 
@@ -166,16 +164,14 @@ public class SamplerAggregator extends DeferableBucketAggregator implements Sing
     }
 
     @Override
-    public InternalAggregation buildAggregation(long owningBucketOrdinal) throws IOException {
-        runDeferredCollections(owningBucketOrdinal);
-        return new InternalSampler(name, bdd == null ? 0 : bdd.getDocCount(owningBucketOrdinal), bucketAggregations(owningBucketOrdinal),
-                pipelineAggregators(),
-                metaData());
+    public InternalAggregation[] buildAggregations(long[] owningBucketOrds) throws IOException {
+        return buildAggregationsForSingleBucket(owningBucketOrds, (owningBucketOrd, subAggregationResults) ->
+            new InternalSampler(name, bdd == null ? 0 : bdd.getDocCount(owningBucketOrd), subAggregationResults, metadata()));
     }
 
     @Override
     public InternalAggregation buildEmptyAggregation() {
-        return new InternalSampler(name, 0, buildEmptySubAggregations(), pipelineAggregators(), metaData());
+        return new InternalSampler(name, 0, buildEmptySubAggregations(), metadata());
     }
 
     @Override

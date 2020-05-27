@@ -19,10 +19,13 @@
 
 package org.elasticsearch.index.mapper;
 
+import org.apache.lucene.analysis.Analyzer;
+import org.apache.lucene.analysis.CannedTokenStream;
 import org.apache.lucene.analysis.MockSynonymAnalyzer;
+import org.apache.lucene.analysis.Token;
 import org.apache.lucene.analysis.TokenStream;
+import org.apache.lucene.analysis.standard.StandardAnalyzer;
 import org.apache.lucene.analysis.tokenattributes.CharTermAttribute;
-import org.apache.lucene.document.FieldType;
 import org.apache.lucene.index.DocValuesType;
 import org.apache.lucene.index.IndexOptions;
 import org.apache.lucene.index.IndexableField;
@@ -31,6 +34,8 @@ import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.PostingsEnum;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.index.TermsEnum;
+import org.apache.lucene.search.BooleanClause;
+import org.apache.lucene.search.BooleanQuery;
 import org.apache.lucene.search.MultiPhraseQuery;
 import org.apache.lucene.search.PhraseQuery;
 import org.apache.lucene.search.Query;
@@ -41,7 +46,6 @@ import org.apache.lucene.search.spans.SpanNearQuery;
 import org.apache.lucene.search.spans.SpanOrQuery;
 import org.apache.lucene.search.spans.SpanTermQuery;
 import org.apache.lucene.util.BytesRef;
-import org.elasticsearch.Version;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.bytes.BytesReference;
@@ -55,6 +59,8 @@ import org.elasticsearch.common.xcontent.XContentFactory;
 import org.elasticsearch.common.xcontent.XContentType;
 import org.elasticsearch.index.IndexService;
 import org.elasticsearch.index.VersionType;
+import org.elasticsearch.index.analysis.AnalyzerScope;
+import org.elasticsearch.index.analysis.NamedAnalyzer;
 import org.elasticsearch.index.engine.Engine;
 import org.elasticsearch.index.mapper.MapperService.MergeReason;
 import org.elasticsearch.index.mapper.TextFieldMapper.TextFieldType;
@@ -65,7 +71,6 @@ import org.elasticsearch.index.search.MatchQuery;
 import org.elasticsearch.index.seqno.SequenceNumbers;
 import org.elasticsearch.index.shard.IndexShard;
 import org.elasticsearch.plugins.Plugin;
-import org.elasticsearch.test.ESSingleNodeTestCase;
 import org.elasticsearch.test.InternalSettingsPlugin;
 import org.junit.Before;
 
@@ -78,9 +83,42 @@ import java.util.Map;
 
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.core.Is.is;
 
-public class TextFieldMapperTests extends ESSingleNodeTestCase {
+public class TextFieldMapperTests extends FieldMapperTestCase<TextFieldMapper.Builder> {
+
+    @Override
+    protected TextFieldMapper.Builder newBuilder() {
+        return new TextFieldMapper.Builder("text")
+            .indexAnalyzer(new NamedAnalyzer("a", AnalyzerScope.INDEX, new StandardAnalyzer()));
+    }
+
+    @Before
+    public void addModifiers() {
+        addBooleanModifier("fielddata", true, TextFieldMapper.Builder::fielddata);
+        addModifier("fielddata_frequency_filter.min", true, (a, b) -> {
+            a.fielddataFrequencyFilter(1, 10, 10);
+            a.fielddataFrequencyFilter(2, 10, 10);
+        });
+        addModifier("fielddata_frequency_filter.max", true, (a, b) -> {
+            a.fielddataFrequencyFilter(1, 10, 10);
+            a.fielddataFrequencyFilter(1, 12, 10);
+        });
+        addModifier("fielddata_frequency_filter.min_segment_size", true, (a, b) -> {
+            a.fielddataFrequencyFilter(1, 10, 10);
+            a.fielddataFrequencyFilter(1, 10, 11);
+        });
+        addBooleanModifier("index_phrases", false, TextFieldMapper.Builder::indexPhrases);
+        addModifier("index_prefixes", false, (a, b) -> {
+            a.indexPrefixes(2, 4);
+        });
+    }
+
+    @Override
+    protected boolean supportsDocValues() {
+        return false;
+    }
 
     IndexService indexService;
     DocumentMapperParser parser;
@@ -110,7 +148,7 @@ public class TextFieldMapperTests extends ESSingleNodeTestCase {
 
         assertEquals(mapping, mapper.mappingSource().toString());
 
-        ParsedDocument doc = mapper.parse(new SourceToParse("test", "type", "1", BytesReference
+        ParsedDocument doc = mapper.parse(new SourceToParse("test", "1", BytesReference
                 .bytes(XContentFactory.jsonBuilder()
                         .startObject()
                         .field("field", "1234")
@@ -142,7 +180,7 @@ public class TextFieldMapperTests extends ESSingleNodeTestCase {
 
         assertEquals(mapping, mapper.mappingSource().toString());
 
-        ParsedDocument doc = mapper.parse(new SourceToParse("test", "type", "1", BytesReference
+        ParsedDocument doc = mapper.parse(new SourceToParse("test", "1", BytesReference
                 .bytes(XContentFactory.jsonBuilder()
                         .startObject()
                         .field("field", "1234")
@@ -163,7 +201,7 @@ public class TextFieldMapperTests extends ESSingleNodeTestCase {
 
         assertEquals(mapping, mapper.mappingSource().toString());
 
-        ParsedDocument doc = mapper.parse(new SourceToParse("test", "type", "1", BytesReference
+        ParsedDocument doc = mapper.parse(new SourceToParse("test", "1", BytesReference
                 .bytes(XContentFactory.jsonBuilder()
                         .startObject()
                         .field("field", "1234")
@@ -186,7 +224,7 @@ public class TextFieldMapperTests extends ESSingleNodeTestCase {
 
         assertEquals(mapping, mapper.mappingSource().toString());
 
-        ParsedDocument doc = mapper.parse(new SourceToParse("test", "type", "1", BytesReference
+        ParsedDocument doc = mapper.parse(new SourceToParse("test", "1", BytesReference
                 .bytes(XContentFactory.jsonBuilder()
                         .startObject()
                         .field("field", "1234")
@@ -217,7 +255,7 @@ public class TextFieldMapperTests extends ESSingleNodeTestCase {
         for (String option : supportedOptions.keySet()) {
             jsonDoc.field(option, "1234");
         }
-        ParsedDocument doc = mapper.parse(new SourceToParse("test", "type", "1", BytesReference.bytes(jsonDoc.endObject()),
+        ParsedDocument doc = mapper.parse(new SourceToParse("test", "1", BytesReference.bytes(jsonDoc.endObject()),
                 XContentType.JSON));
 
         for (Map.Entry<String, IndexOptions> entry : supportedOptions.entrySet()) {
@@ -239,7 +277,7 @@ public class TextFieldMapperTests extends ESSingleNodeTestCase {
 
         assertEquals(mapping, mapper.mappingSource().toString());
 
-        SourceToParse sourceToParse = new SourceToParse("test", "type", "1", BytesReference
+        SourceToParse sourceToParse = new SourceToParse("test", "1", BytesReference
                 .bytes(XContentFactory.jsonBuilder()
                         .startObject()
                         .array("field", new String[] {"a", "b"})
@@ -281,7 +319,7 @@ public class TextFieldMapperTests extends ESSingleNodeTestCase {
 
         assertEquals(mapping, mapper.mappingSource().toString());
 
-        SourceToParse sourceToParse = new SourceToParse("test", "type", "1", BytesReference
+        SourceToParse sourceToParse = new SourceToParse("test", "1", BytesReference
                 .bytes(XContentFactory.jsonBuilder()
                         .startObject()
                         .array("field", new String[]{"a", "b"})
@@ -440,7 +478,7 @@ public class TextFieldMapperTests extends ESSingleNodeTestCase {
 
         DocumentMapper defaultMapper = parser.parse("type", new CompressedXContent(mapping));
 
-        ParsedDocument doc = defaultMapper.parse(new SourceToParse("test", "type", "1", BytesReference
+        ParsedDocument doc = defaultMapper.parse(new SourceToParse("test", "1", BytesReference
                 .bytes(XContentFactory.jsonBuilder()
                         .startObject()
                         .field("field1", "1234")
@@ -511,7 +549,7 @@ public class TextFieldMapperTests extends ESSingleNodeTestCase {
             FieldMapper fieldMapper = (FieldMapper) disabledMapper.mappers().getMapper("field");
             fieldMapper.fieldType().fielddataBuilder("test");
         });
-        assertThat(e.getMessage(), containsString("Fielddata is disabled"));
+        assertThat(e.getMessage(), containsString("Text fields are not optimised for operations that require per-document field data"));
 
         mapping = Strings.toString(XContentFactory.jsonBuilder().startObject().startObject("type")
                 .startObject("properties").startObject("field")
@@ -635,7 +673,8 @@ public class TextFieldMapperTests extends ESSingleNodeTestCase {
             DocumentMapper mapper = parser.parse("type", new CompressedXContent(mapping));
 
             FieldMapper prefix = (FieldMapper) mapper.mappers().getMapper("field._index_prefix");
-            FieldType ft = prefix.fieldType;
+            MappedFieldType ft = prefix.fieldType;
+            assertEquals(ft.name(), "field._index_prefix");
             assertEquals(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS_AND_OFFSETS, ft.indexOptions());
         }
 
@@ -651,7 +690,8 @@ public class TextFieldMapperTests extends ESSingleNodeTestCase {
             DocumentMapper mapper = parser.parse("type", new CompressedXContent(mapping));
 
             FieldMapper prefix = (FieldMapper) mapper.mappers().getMapper("field._index_prefix");
-            FieldType ft = prefix.fieldType;
+            MappedFieldType ft = prefix.fieldType;
+            assertEquals(ft.name(), "field._index_prefix");
             assertEquals(IndexOptions.DOCS, ft.indexOptions());
             assertFalse(ft.storeTermVectors());
         }
@@ -668,12 +708,9 @@ public class TextFieldMapperTests extends ESSingleNodeTestCase {
             DocumentMapper mapper = parser.parse("type", new CompressedXContent(mapping));
 
             FieldMapper prefix = (FieldMapper) mapper.mappers().getMapper("field._index_prefix");
-            FieldType ft = prefix.fieldType;
-            if (indexService.getIndexSettings().getIndexVersionCreated().onOrAfter(Version.V_6_4_0)) {
-                assertEquals(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS, ft.indexOptions());
-            } else {
-                assertEquals(IndexOptions.DOCS, ft.indexOptions());
-            }
+            MappedFieldType ft = prefix.fieldType;
+            assertEquals(ft.name(), "field._index_prefix");
+            assertEquals(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS, ft.indexOptions());
             assertFalse(ft.storeTermVectors());
         }
 
@@ -689,12 +726,9 @@ public class TextFieldMapperTests extends ESSingleNodeTestCase {
             DocumentMapper mapper = parser.parse("type", new CompressedXContent(mapping));
 
             FieldMapper prefix = (FieldMapper) mapper.mappers().getMapper("field._index_prefix");
-            FieldType ft = prefix.fieldType;
-            if (indexService.getIndexSettings().getIndexVersionCreated().onOrAfter(Version.V_6_4_0)) {
-                assertEquals(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS, ft.indexOptions());
-            } else {
-                assertEquals(IndexOptions.DOCS, ft.indexOptions());
-            }
+            MappedFieldType ft = prefix.fieldType;
+            assertEquals(ft.name(), "field._index_prefix");
+            assertEquals(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS, ft.indexOptions());
             assertTrue(ft.storeTermVectorOffsets());
         }
 
@@ -710,13 +744,64 @@ public class TextFieldMapperTests extends ESSingleNodeTestCase {
             DocumentMapper mapper = parser.parse("type", new CompressedXContent(mapping));
 
             FieldMapper prefix = (FieldMapper) mapper.mappers().getMapper("field._index_prefix");
-            FieldType ft = prefix.fieldType;
-            if (indexService.getIndexSettings().getIndexVersionCreated().onOrAfter(Version.V_6_4_0)) {
-                assertEquals(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS, ft.indexOptions());
-            } else {
-                assertEquals(IndexOptions.DOCS, ft.indexOptions());
-            }
+            MappedFieldType ft = prefix.fieldType;
+            assertEquals(ft.name(), "field._index_prefix");
+            assertEquals(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS, ft.indexOptions());
             assertFalse(ft.storeTermVectorOffsets());
+        }
+    }
+
+    public void testNestedIndexPrefixes() throws IOException {
+        {
+            String mapping = Strings.toString(XContentFactory.jsonBuilder()
+                    .startObject()
+                        .startObject("properties")
+                            .startObject("object")
+                                .field("type", "object")
+                                .startObject("properties")
+                                    .startObject("field")
+                                        .field("type", "text")
+                                        .startObject("index_prefixes").endObject()
+                                    .endObject()
+                                .endObject()
+                            .endObject()
+                        .endObject()
+                    .endObject());
+
+            indexService.mapperService().merge("type", new CompressedXContent(mapping), MergeReason.MAPPING_UPDATE);
+            MappedFieldType textField = indexService.mapperService().fieldType("object.field");
+            assertNotNull(textField);
+            assertThat(textField, instanceOf(TextFieldType.class));
+            MappedFieldType prefix = ((TextFieldType) textField).getPrefixFieldType();
+            assertEquals(prefix.name(), "object.field._index_prefix");
+            assertEquals(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS, prefix.indexOptions());
+            assertFalse(prefix.storeTermVectorOffsets());
+        }
+
+        {
+            String mapping = Strings.toString(XContentFactory.jsonBuilder()
+                .startObject()
+                    .startObject("properties")
+                        .startObject("body")
+                            .field("type", "text")
+                            .startObject("fields")
+                                .startObject("with_prefix")
+                                    .field("type", "text")
+                                    .startObject("index_prefixes").endObject()
+                                .endObject()
+                            .endObject()
+                        .endObject()
+                    .endObject()
+                .endObject());
+
+            indexService.mapperService().merge("type", new CompressedXContent(mapping), MergeReason.MAPPING_UPDATE);
+            MappedFieldType textField = indexService.mapperService().fieldType("body.with_prefix");
+            assertNotNull(textField);
+            assertThat(textField, instanceOf(TextFieldType.class));
+            MappedFieldType prefix = ((TextFieldType) textField).getPrefixFieldType();
+            assertEquals(prefix.name(), "body.with_prefix._index_prefix");
+            assertEquals(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS, prefix.indexOptions());
+            assertFalse(prefix.storeTermVectorOffsets());
         }
     }
 
@@ -772,7 +857,28 @@ public class TextFieldMapperTests extends ESSingleNodeTestCase {
                 new Term("synfield._index_phrase", "motor dog")})
             .build()));
 
-        ParsedDocument doc = mapper.parse(new SourceToParse("test", "type", "1", BytesReference
+        // https://github.com/elastic/elasticsearch/issues/43976
+        CannedTokenStream cts = new CannedTokenStream(
+            new Token("foo", 1, 0, 2, 2),
+            new Token("bar", 0, 0, 2),
+            new Token("baz", 1, 0, 2)
+        );
+        Analyzer synonymAnalyzer = new Analyzer() {
+            @Override
+            protected TokenStreamComponents createComponents(String fieldName) {
+                return new TokenStreamComponents(reader -> {}, cts);
+            }
+        };
+        matchQuery.setAnalyzer(synonymAnalyzer);
+        Query q7 = matchQuery.parse(MatchQuery.Type.BOOLEAN, "synfield", "foo");
+        assertThat(q7, is(new BooleanQuery.Builder().add(new BooleanQuery.Builder()
+            .add(new TermQuery(new Term("synfield", "foo")), BooleanClause.Occur.SHOULD)
+            .add(new PhraseQuery.Builder()
+                .add(new Term("synfield._index_phrase", "bar baz"))
+                .build(), BooleanClause.Occur.SHOULD)
+            .build(), BooleanClause.Occur.SHOULD).build()));
+
+        ParsedDocument doc = mapper.parse(new SourceToParse("test", "1", BytesReference
                 .bytes(XContentFactory.jsonBuilder()
                     .startObject()
                     .field("field", "Some English text that is going to be very useful")
@@ -837,7 +943,7 @@ public class TextFieldMapperTests extends ESSingleNodeTestCase {
 
             assertThat(mapper.mappers().getMapper("field._index_prefix").toString(), containsString("prefixChars=2:10"));
 
-            ParsedDocument doc = mapper.parse(new SourceToParse("test", "type", "1", BytesReference
+            ParsedDocument doc = mapper.parse(new SourceToParse("test", "1", BytesReference
                     .bytes(XContentFactory.jsonBuilder()
                             .startObject()
                             .field("field", "Some English text that is going to be very useful")
@@ -1083,5 +1189,122 @@ public class TextFieldMapperTests extends ESSingleNodeTestCase {
             mpq.add(new Term("field", "d"));
             assertThat(q, equalTo(mpq));
         }
+    }
+
+    public void testSimpleMerge() throws IOException {
+        MapperService mapperService = createIndex("test_mapping_merge").mapperService();
+        {
+            String mapping = Strings.toString(XContentFactory.jsonBuilder().startObject()
+                .startObject("_doc")
+                    .startObject("properties")
+                        .startObject("a_field")
+                            .field("type", "text")
+                            .startObject("index_prefixes").endObject()
+                            .field("index_phrases", true)
+                        .endObject()
+                    .endObject()
+                .endObject().endObject());
+            DocumentMapper mapper = mapperService.merge("_doc",
+                new CompressedXContent(mapping), MapperService.MergeReason.MAPPING_UPDATE);
+            assertThat(mapper.mappers().getMapper("a_field"), instanceOf(TextFieldMapper.class));
+        }
+
+        {
+            String mapping = Strings.toString(XContentFactory.jsonBuilder().startObject()
+                .startObject("_doc")
+                    .startObject("properties")
+                        .startObject("a_field")
+                            .field("type", "text")
+                            .startObject("index_prefixes").endObject()
+                            .field("index_phrases", true)
+                        .endObject()
+                    .endObject()
+                .endObject().endObject());
+            DocumentMapper mapper = mapperService.merge("_doc",
+                new CompressedXContent(mapping), MapperService.MergeReason.MAPPING_UPDATE);
+            assertThat(mapper.mappers().getMapper("a_field"), instanceOf(TextFieldMapper.class));
+        }
+
+        {
+            String mapping = Strings.toString(XContentFactory.jsonBuilder().startObject()
+                .startObject("_doc")
+                    .startObject("properties")
+                        .startObject("a_field")
+                            .field("type", "text")
+                                .startObject("index_prefixes")
+                                    .field("min_chars", "3")
+                                .endObject()
+                                .field("index_phrases", true)
+                            .endObject()
+                    .endObject()
+                .endObject().endObject());
+            IllegalArgumentException e = expectThrows(IllegalArgumentException.class,
+                () -> mapperService.merge("_doc",
+                    new CompressedXContent(mapping), MapperService.MergeReason.MAPPING_UPDATE));
+            assertThat(e.getMessage(), containsString("different [index_prefixes]"));
+        }
+
+        {
+            String mapping = Strings.toString(XContentFactory.jsonBuilder().startObject()
+                .startObject("_doc")
+                    .startObject("properties")
+                        .startObject("a_field")
+                            .field("type", "text")
+                            .startObject("index_prefixes").endObject()
+                            .field("index_phrases", false)
+                        .endObject()
+                    .endObject()
+                .endObject().endObject());
+            IllegalArgumentException e = expectThrows(IllegalArgumentException.class,
+                () -> mapperService.merge("_doc",
+                    new CompressedXContent(mapping), MapperService.MergeReason.MAPPING_UPDATE));
+            assertThat(e.getMessage(), containsString("different [index_phrases]"));
+        }
+
+        {
+            String mapping = Strings.toString(XContentFactory.jsonBuilder().startObject()
+                .startObject("_doc")
+                    .startObject("properties")
+                        .startObject("a_field")
+                            .field("type", "text")
+                            .startObject("index_prefixes").endObject()
+                            .field("index_phrases", true)
+                        .endObject()
+                        .startObject("b_field")
+                            .field("type", "keyword")
+                        .endObject()
+                    .endObject()
+                .endObject().endObject());
+            DocumentMapper mapper = mapperService.merge("_doc",
+                new CompressedXContent(mapping), MapperService.MergeReason.MAPPING_UPDATE);
+            assertThat(mapper.mappers().getMapper("a_field"), instanceOf(TextFieldMapper.class));
+            assertThat(mapper.mappers().getMapper("b_field"), instanceOf(KeywordFieldMapper.class));
+        }
+    }
+
+    public void testMeta() throws Exception {
+        String mapping = Strings.toString(XContentFactory.jsonBuilder().startObject().startObject("_doc")
+                .startObject("properties").startObject("field").field("type", "text")
+                .field("meta", Collections.singletonMap("foo", "bar"))
+                .endObject().endObject().endObject().endObject());
+
+        DocumentMapper mapper = indexService.mapperService().merge("_doc",
+                new CompressedXContent(mapping), MergeReason.MAPPING_UPDATE);
+        assertEquals(mapping, mapper.mappingSource().toString());
+
+        String mapping2 = Strings.toString(XContentFactory.jsonBuilder().startObject().startObject("_doc")
+                .startObject("properties").startObject("field").field("type", "text")
+                .endObject().endObject().endObject().endObject());
+        mapper = indexService.mapperService().merge("_doc",
+                new CompressedXContent(mapping2), MergeReason.MAPPING_UPDATE);
+        assertEquals(mapping2, mapper.mappingSource().toString());
+
+        String mapping3 = Strings.toString(XContentFactory.jsonBuilder().startObject().startObject("_doc")
+                .startObject("properties").startObject("field").field("type", "text")
+                .field("meta", Collections.singletonMap("baz", "quux"))
+                .endObject().endObject().endObject().endObject());
+        mapper = indexService.mapperService().merge("_doc",
+                new CompressedXContent(mapping3), MergeReason.MAPPING_UPDATE);
+        assertEquals(mapping3, mapper.mappingSource().toString());
     }
 }

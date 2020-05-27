@@ -33,13 +33,12 @@ import org.elasticsearch.index.fielddata.SortedBinaryDocValues;
 import org.elasticsearch.search.aggregations.Aggregator;
 import org.elasticsearch.search.aggregations.AggregatorFactories;
 import org.elasticsearch.search.aggregations.bucket.DeferringBucketCollector;
-import org.elasticsearch.search.aggregations.pipeline.PipelineAggregator;
 import org.elasticsearch.search.aggregations.support.ValuesSource;
 import org.elasticsearch.search.internal.SearchContext;
 
 import java.io.IOException;
-import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 
 public class DiversifiedMapSamplerAggregator extends SamplerAggregator {
 
@@ -48,13 +47,13 @@ public class DiversifiedMapSamplerAggregator extends SamplerAggregator {
     private BytesRefHash bucketOrds;
 
     DiversifiedMapSamplerAggregator(String name, int shardSize, AggregatorFactories factories,
-            SearchContext context, Aggregator parent, List<PipelineAggregator> pipelineAggregators, Map<String, Object> metaData,
+            SearchContext context, Aggregator parent, Map<String, Object> metadata,
             ValuesSource valuesSource, int maxDocsPerValue) throws IOException {
-        super(name, shardSize, factories, context, parent, pipelineAggregators, metaData);
+        super(name, shardSize, factories, context, parent, metadata);
         this.valuesSource = valuesSource;
         this.maxDocsPerValue = maxDocsPerValue;
-        bucketOrds = new BytesRefHash(shardSize, context.bigArrays());
-
+        // Need to use super class shardSize since it is limited to maxDoc
+        bucketOrds = new BytesRefHash(this.shardSize, context.bigArrays());
     }
 
     @Override
@@ -65,7 +64,7 @@ public class DiversifiedMapSamplerAggregator extends SamplerAggregator {
 
     @Override
     public DeferringBucketCollector getDeferringCollector() {
-        bdd = new DiverseDocsDeferringCollector();
+        bdd = new DiverseDocsDeferringCollector(this::addRequestCircuitBreakerBytes);
         return bdd;
     }
 
@@ -76,14 +75,20 @@ public class DiversifiedMapSamplerAggregator extends SamplerAggregator {
      */
     class DiverseDocsDeferringCollector extends BestDocsDeferringCollector {
 
-        DiverseDocsDeferringCollector() {
-            super(shardSize, context.bigArrays());
+        DiverseDocsDeferringCollector(Consumer<Long> circuitBreakerConsumer) {
+            super(shardSize, context.bigArrays(), circuitBreakerConsumer);
         }
-
 
         @Override
         protected TopDocsCollector<ScoreDocKey> createTopDocsCollector(int size) {
-            return new ValuesDiversifiedTopDocsCollector(size, maxDocsPerValue);
+            // Make sure we do not allow size > maxDoc, to prevent accidental OOM
+            int minMaxDocsPerValue = Math.min(maxDocsPerValue, context.searcher().getIndexReader().maxDoc());
+            return new ValuesDiversifiedTopDocsCollector(size, minMaxDocsPerValue);
+        }
+
+        @Override
+        protected long getPriorityQueueSlotSize() {
+            return SCOREDOCKEY_SIZE;
         }
 
         // This class extends the DiversifiedTopDocsCollector and provides
@@ -94,7 +99,6 @@ public class DiversifiedMapSamplerAggregator extends SamplerAggregator {
 
             ValuesDiversifiedTopDocsCollector(int numHits, int maxHitsPerKey) {
                 super(numHits, maxHitsPerKey);
-
             }
 
             @Override

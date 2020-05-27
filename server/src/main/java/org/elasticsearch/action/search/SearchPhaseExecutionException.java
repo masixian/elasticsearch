@@ -24,6 +24,7 @@ import org.elasticsearch.ExceptionsHelper;
 import org.elasticsearch.action.ShardOperationFailedException;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
+import org.elasticsearch.common.util.CollectionUtils;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.rest.RestStatus;
 
@@ -85,8 +86,9 @@ public class SearchPhaseExecutionException extends ElasticsearchException {
     @Override
     public RestStatus status() {
         if (shardFailures.length == 0) {
-            // if no successful shards, it means no active shards, so just return SERVICE_UNAVAILABLE
-            return RestStatus.SERVICE_UNAVAILABLE;
+            // if no successful shards, the failure can be due to EsRejectedExecutionException during fetch phase
+            // on coordinator node. so get the status from cause instead of returning SERVICE_UNAVAILABLE blindly
+            return getCause() == null ? RestStatus.SERVICE_UNAVAILABLE : ExceptionsHelper.status(getCause());
         }
         RestStatus status = shardFailures[0].status();
         if (shardFailures.length > 1) {
@@ -118,7 +120,7 @@ public class SearchPhaseExecutionException extends ElasticsearchException {
     private static String buildMessage(String phaseName, String msg, ShardSearchFailure[] shardFailures) {
         StringBuilder sb = new StringBuilder();
         sb.append("Failed to execute phase [").append(phaseName).append("], ").append(msg);
-        if (shardFailures != null && shardFailures.length > 0) {
+        if (CollectionUtils.isEmpty(shardFailures) == false) {
             sb.append("; shardFailures ");
             for (ShardSearchFailure shardFailure : shardFailures) {
                 if (shardFailure.shard() != null) {
@@ -139,9 +141,7 @@ public class SearchPhaseExecutionException extends ElasticsearchException {
         builder.startArray();
         ShardOperationFailedException[] failures = ExceptionsHelper.groupBy(shardFailures);
         for (ShardOperationFailedException failure : failures) {
-            builder.startObject();
             failure.toXContent(builder, params);
-            builder.endObject();
         }
         builder.endArray();
     }

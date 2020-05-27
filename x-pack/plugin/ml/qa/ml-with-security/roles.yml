@@ -9,9 +9,10 @@ minimal:
     # non-ML indices
     - names: [ 'airline-data', 'index-*', 'unavailable-data', 'utopia' ]
       privileges:
-        - indices:admin/create
+        - create_index
         - indices:admin/refresh
-        - indices:data/read/field_caps
-        - indices:data/read/search
+        - read
+        - index
+        - view_index_metadata
         - indices:data/write/bulk
         - indices:data/write/index

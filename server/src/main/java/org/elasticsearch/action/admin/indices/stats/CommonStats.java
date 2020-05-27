@@ -20,6 +20,8 @@
 package org.elasticsearch.action.admin.indices.stats;
 
 import org.apache.lucene.store.AlreadyClosedException;
+import org.elasticsearch.Version;
+import org.elasticsearch.index.bulk.stats.BulkStats;
 import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
@@ -102,6 +104,9 @@ public class CommonStats implements Writeable, ToXContentFragment {
     @Nullable
     public RecoveryStats recoveryStats;
 
+    @Nullable
+    public BulkStats bulk;
+
     public CommonStats() {
         this(CommonStatsFlags.NONE);
     }
@@ -159,6 +164,9 @@ public class CommonStats implements Writeable, ToXContentFragment {
                 case Recovery:
                     recoveryStats = new RecoveryStats();
                     break;
+                case Bulk:
+                    bulk = new BulkStats();
+                    break;
                 default:
                     throw new IllegalStateException("Unknown Flag: " + flag);
             }
@@ -177,7 +185,7 @@ public class CommonStats implements Writeable, ToXContentFragment {
                         store = indexShard.storeStats();
                         break;
                     case Indexing:
-                        indexing = indexShard.indexingStats(flags.types());
+                        indexing = indexShard.indexingStats();
                         break;
                     case Get:
                         get = indexShard.getStats();
@@ -218,6 +226,9 @@ public class CommonStats implements Writeable, ToXContentFragment {
                     case Recovery:
                         recoveryStats = indexShard.recoveryStats();
                         break;
+                    case Bulk:
+                        bulk = indexShard.bulkStats();
+                        break;
                     default:
                         throw new IllegalStateException("Unknown Flag: " + flag);
                 }
@@ -228,42 +239,48 @@ public class CommonStats implements Writeable, ToXContentFragment {
     }
 
     public CommonStats(StreamInput in) throws IOException {
-        docs = in.readOptionalStreamable(DocsStats::new);
-        store = in.readOptionalStreamable(StoreStats::new);
-        indexing = in.readOptionalStreamable(IndexingStats::new);
-        get = in.readOptionalStreamable(GetStats::new);
+        docs = in.readOptionalWriteable(DocsStats::new);
+        store = in.readOptionalWriteable(StoreStats::new);
+        indexing = in.readOptionalWriteable(IndexingStats::new);
+        get = in.readOptionalWriteable(GetStats::new);
         search = in.readOptionalWriteable(SearchStats::new);
-        merge = in.readOptionalStreamable(MergeStats::new);
-        refresh =  in.readOptionalStreamable(RefreshStats::new);
-        flush =  in.readOptionalStreamable(FlushStats::new);
-        warmer =  in.readOptionalStreamable(WarmerStats::new);
-        queryCache = in.readOptionalStreamable(QueryCacheStats::new);
-        fieldData =  in.readOptionalStreamable(FieldDataStats::new);
-        completion =  in.readOptionalStreamable(CompletionStats::new);
-        segments =  in.readOptionalStreamable(SegmentsStats::new);
-        translog = in.readOptionalStreamable(TranslogStats::new);
-        requestCache = in.readOptionalStreamable(RequestCacheStats::new);
-        recoveryStats = in.readOptionalStreamable(RecoveryStats::new);
+        merge = in.readOptionalWriteable(MergeStats::new);
+        refresh = in.readOptionalWriteable(RefreshStats::new);
+        flush = in.readOptionalWriteable(FlushStats::new);
+        warmer = in.readOptionalWriteable(WarmerStats::new);
+        queryCache = in.readOptionalWriteable(QueryCacheStats::new);
+        fieldData = in.readOptionalWriteable(FieldDataStats::new);
+        completion = in.readOptionalWriteable(CompletionStats::new);
+        segments = in.readOptionalWriteable(SegmentsStats::new);
+        translog = in.readOptionalWriteable(TranslogStats::new);
+        requestCache = in.readOptionalWriteable(RequestCacheStats::new);
+        recoveryStats = in.readOptionalWriteable(RecoveryStats::new);
+        if (in.getVersion().onOrAfter(Version.V_8_0_0)) {
+            bulk = in.readOptionalWriteable(BulkStats::new);
+        }
     }
 
     @Override
     public void writeTo(StreamOutput out) throws IOException {
-        out.writeOptionalStreamable(docs);
-        out.writeOptionalStreamable(store);
-        out.writeOptionalStreamable(indexing);
-        out.writeOptionalStreamable(get);
+        out.writeOptionalWriteable(docs);
+        out.writeOptionalWriteable(store);
+        out.writeOptionalWriteable(indexing);
+        out.writeOptionalWriteable(get);
         out.writeOptionalWriteable(search);
-        out.writeOptionalStreamable(merge);
-        out.writeOptionalStreamable(refresh);
-        out.writeOptionalStreamable(flush);
-        out.writeOptionalStreamable(warmer);
-        out.writeOptionalStreamable(queryCache);
-        out.writeOptionalStreamable(fieldData);
-        out.writeOptionalStreamable(completion);
-        out.writeOptionalStreamable(segments);
-        out.writeOptionalStreamable(translog);
-        out.writeOptionalStreamable(requestCache);
-        out.writeOptionalStreamable(recoveryStats);
+        out.writeOptionalWriteable(merge);
+        out.writeOptionalWriteable(refresh);
+        out.writeOptionalWriteable(flush);
+        out.writeOptionalWriteable(warmer);
+        out.writeOptionalWriteable(queryCache);
+        out.writeOptionalWriteable(fieldData);
+        out.writeOptionalWriteable(completion);
+        out.writeOptionalWriteable(segments);
+        out.writeOptionalWriteable(translog);
+        out.writeOptionalWriteable(requestCache);
+        out.writeOptionalWriteable(recoveryStats);
+        if (out.getVersion().onOrAfter(Version.V_8_0_0)) {
+            out.writeOptionalWriteable(bulk);
+        }
     }
 
     public void add(CommonStats stats) {
@@ -396,6 +413,14 @@ public class CommonStats implements Writeable, ToXContentFragment {
         } else {
             recoveryStats.add(stats.getRecoveryStats());
         }
+        if (bulk == null) {
+            if (stats.getBulk() != null) {
+                bulk = new BulkStats();
+                bulk.add(stats.getBulk());
+            }
+        } else {
+            bulk.add(stats.getBulk());
+        }
     }
 
     @Nullable
@@ -478,6 +503,11 @@ public class CommonStats implements Writeable, ToXContentFragment {
         return recoveryStats;
     }
 
+    @Nullable
+    public BulkStats getBulk() {
+        return bulk;
+    }
+
     /**
      * Utility method which computes total memory by adding
      * FieldData, PercolatorCache, Segments (memory, index writer, version map)
@@ -504,7 +534,7 @@ public class CommonStats implements Writeable, ToXContentFragment {
     public XContentBuilder toXContent(XContentBuilder builder, Params params) throws IOException {
         final Stream<ToXContent> stream = Arrays.stream(new ToXContent[] {
             docs, store, indexing, get, search, merge, refresh, flush, warmer, queryCache,
-            fieldData, completion, segments, translog, requestCache, recoveryStats})
+            fieldData, completion, segments, translog, requestCache, recoveryStats, bulk})
             .filter(Objects::nonNull);
         for (ToXContent toXContent : ((Iterable<ToXContent>)stream::iterator)) {
             toXContent.toXContent(builder, params);

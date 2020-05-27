@@ -5,24 +5,16 @@
  */
 package org.elasticsearch.transport;
 
-import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.test.SecurityIntegTestCase;
-import org.elasticsearch.xpack.core.XPackSettings;
 import org.elasticsearch.xpack.security.transport.SecurityServerTransportInterceptor;
 
 // this class sits in org.elasticsearch.transport so that TransportService.requestHandlers is visible
 public class SecurityServerTransportServiceTests extends SecurityIntegTestCase {
-    @Override
-    protected Settings transportClientSettings() {
-        return Settings.builder()
-                .put(super.transportClientSettings())
-                .put(XPackSettings.SECURITY_ENABLED.getKey(), true)
-                .build();
-    }
 
     public void testSecurityServerTransportServiceWrapsAllHandlers() {
         for (TransportService transportService : internalCluster().getInstances(TransportService.class)) {
-            RequestHandlerRegistry handler = transportService.transport.getRequestHandler(TransportService.HANDSHAKE_ACTION_NAME);
+            RequestHandlerRegistry handler = transportService.transport.getRequestHandlers()
+                .getHandler(TransportService.HANDSHAKE_ACTION_NAME);
             assertEquals(
                     "handler not wrapped by " + SecurityServerTransportInterceptor.ProfileSecuredRequestHandler.class +
                             "; do all the handler registration methods have overrides?",

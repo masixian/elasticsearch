@@ -29,7 +29,6 @@ import org.apache.lucene.search.similarities.BasicModelIF;
 import org.apache.lucene.search.similarities.BasicModelIn;
 import org.apache.lucene.search.similarities.BasicModelIne;
 import org.apache.lucene.search.similarities.BooleanSimilarity;
-import org.apache.lucene.search.similarities.ClassicSimilarity;
 import org.apache.lucene.search.similarities.DFISimilarity;
 import org.apache.lucene.search.similarities.DFRSimilarity;
 import org.apache.lucene.search.similarities.Distribution;
@@ -56,12 +55,9 @@ import org.elasticsearch.common.logging.DeprecationLogger;
 import org.elasticsearch.common.settings.Settings;
 
 import java.util.Arrays;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
-
-import static java.util.Collections.unmodifiableMap;
 
 final class SimilarityProviders {
 
@@ -70,61 +66,37 @@ final class SimilarityProviders {
     private static final DeprecationLogger deprecationLogger = new DeprecationLogger(LogManager.getLogger(SimilarityProviders.class));
     static final String DISCOUNT_OVERLAPS = "discount_overlaps";
 
-    private static final Map<String, BasicModel> BASIC_MODELS;
-    private static final Map<String, String> LEGACY_BASIC_MODELS;
-    private static final Map<String, AfterEffect> AFTER_EFFECTS;
-    private static final Map<String, String> LEGACY_AFTER_EFFECTS;
+    private static final Map<String, BasicModel> BASIC_MODELS = Map.of(
+            "g", new BasicModelG(),
+            "if", new BasicModelIF(),
+            "in", new BasicModelIn(),
+            "ine", new BasicModelIne());
 
-    static {
-        Map<String, BasicModel> models = new HashMap<>();
-        models.put("g", new BasicModelG());
-        models.put("if", new BasicModelIF());
-        models.put("in", new BasicModelIn());
-        models.put("ine", new BasicModelIne());
-        BASIC_MODELS = unmodifiableMap(models);
+    // TODO: be and g and both based on the bose-einstein model.
+    // Is there a better replacement for d and p which use the binomial model?
+    private static final Map<String, String> LEGACY_BASIC_MODELS = Map.of(
+            "be", "g",
+            "d", "ine",
+            "p", "ine");
 
-        Map<String, String> legacyModels = new HashMap<>();
-        // TODO: be and g and both based on the bose-einstein model.
-        // Is there a better replacement for d and p which use the binomial model?
-        legacyModels.put("be", "g");
-        legacyModels.put("d", "ine");
-        legacyModels.put("p", "ine");
-        LEGACY_BASIC_MODELS = unmodifiableMap(legacyModels);
+    private static final Map<String, AfterEffect> AFTER_EFFECTS = Map.of(
+            "b", new AfterEffectB(),
+            "l", new AfterEffectL());
+    // l is simpler than b, so this should be a better replacement for "no"
+    private static final Map<String, String> LEGACY_AFTER_EFFECTS = Map.of("no", "l");
 
-        Map<String, AfterEffect> effects = new HashMap<>();
-        effects.put("b", new AfterEffectB());
-        effects.put("l", new AfterEffectL());
-        AFTER_EFFECTS = unmodifiableMap(effects);
+    private static final Map<String, Independence> INDEPENDENCE_MEASURES =  Map.of(
+            "standardized", new IndependenceStandardized(),
+            "saturated", new IndependenceSaturated(),
+            "chisquared", new IndependenceChiSquared());
 
-        Map<String, String> legacyEffects = new HashMap<>();
-        // l is simpler than b, so this should be a better replacement for "no"
-        legacyEffects.put("no", "l");
-        LEGACY_AFTER_EFFECTS = unmodifiableMap(legacyEffects);
-    }
+    private static final Map<String, Distribution> DISTRIBUTIONS = Map.of(
+            "ll", new DistributionLL(),
+            "spl", new DistributionSPL());
 
-    private static final Map<String, Independence> INDEPENDENCE_MEASURES;
-    static {
-        Map<String, Independence> measures = new HashMap<>();
-        measures.put("standardized", new IndependenceStandardized());
-        measures.put("saturated", new IndependenceSaturated());
-        measures.put("chisquared", new IndependenceChiSquared());
-        INDEPENDENCE_MEASURES = unmodifiableMap(measures);
-    }
-
-    private static final Map<String, Distribution> DISTRIBUTIONS;
-    private static final Map<String, Lambda> LAMBDAS;
-
-    static {
-        Map<String, Distribution> distributions = new HashMap<>();
-        distributions.put("ll", new DistributionLL());
-        distributions.put("spl", new DistributionSPL());
-        DISTRIBUTIONS = unmodifiableMap(distributions);
-
-        Map<String, Lambda> lamdas = new HashMap<>();
-        lamdas.put("df", new LambdaDF());
-        lamdas.put("ttf", new LambdaTTF());
-        LAMBDAS = unmodifiableMap(lamdas);
-    }
+    private static final Map<String, Lambda> LAMBDAS = Map.of(
+            "df", new LambdaDF(),
+            "ttf", new LambdaTTF());
 
     /**
      * Parses the given Settings and creates the appropriate {@link BasicModel}
@@ -143,7 +115,7 @@ final class SimilarityProviders {
                     throw new IllegalArgumentException("Basic model [" + basicModel + "] isn't supported anymore, " +
                         "please use another model.");
                 } else {
-                    deprecationLogger.deprecated("Basic model [" + basicModel +
+                    deprecationLogger.deprecatedAndMaybeLog(basicModel + "_similarity_model_replaced", "Basic model [" + basicModel +
                         "] isn't supported anymore and has arbitrarily been replaced with [" + replacement + "].");
                     model = BASIC_MODELS.get(replacement);
                     assert model != null;
@@ -174,7 +146,7 @@ final class SimilarityProviders {
                     throw new IllegalArgumentException("After effect [" + afterEffect +
                         "] isn't supported anymore, please use another effect.");
                 } else {
-                    deprecationLogger.deprecated("After effect [" + afterEffect +
+                    deprecationLogger.deprecatedAndMaybeLog(afterEffect + "_after_effect_replaced", "After effect [" + afterEffect +
                         "] isn't supported anymore and has arbitrarily been replaced with [" + replacement + "].");
                     effect = AFTER_EFFECTS.get(replacement);
                     assert effect != null;
@@ -264,7 +236,8 @@ final class SimilarityProviders {
             if (version.onOrAfter(Version.V_7_0_0)) {
                 throw new IllegalArgumentException("Unknown settings for similarity of type [" + type + "]: " + unknownSettings);
             } else {
-                deprecationLogger.deprecated("Unknown settings for similarity of type [" + type + "]: " + unknownSettings);
+                deprecationLogger.deprecatedAndMaybeLog("unknown_similarity_setting",
+                    "Unknown settings for similarity of type [" + type + "]: " + unknownSettings);
             }
         }
     }
@@ -284,16 +257,6 @@ final class SimilarityProviders {
     public static BooleanSimilarity createBooleanSimilarity(Settings settings, Version indexCreatedVersion) {
         assertSettingsIsSubsetOf("boolean", indexCreatedVersion, settings);
         return new BooleanSimilarity();
-    }
-
-    public static ClassicSimilarity createClassicSimilarity(Settings settings, Version indexCreatedVersion) {
-        assertSettingsIsSubsetOf("classic", indexCreatedVersion, settings, DISCOUNT_OVERLAPS);
-
-        boolean discountOverlaps = settings.getAsBoolean(DISCOUNT_OVERLAPS, true);
-
-        ClassicSimilarity similarity = new ClassicSimilarity();
-        similarity.setDiscountOverlaps(discountOverlaps);
-        return similarity;
     }
 
     public static DFRSimilarity createDfrSimilarity(Settings settings, Version indexCreatedVersion) {

@@ -19,12 +19,13 @@
 
 package org.elasticsearch.common.io;
 
-import org.elasticsearch.core.internal.io.IOUtils;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.io.stream.BytesStream;
+import org.elasticsearch.common.io.stream.BytesStreamOutput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 
 import java.io.BufferedReader;
+import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -50,6 +51,19 @@ public abstract class Streams {
 
     public static final int BUFFER_SIZE = 1024 * 8;
 
+    /**
+     * OutputStream that just throws all the bytes away
+     */
+    public static final OutputStream NULL_OUTPUT_STREAM = new OutputStream() {
+        @Override
+        public void write(int b) {
+            // no-op
+        }
+        @Override
+        public void write(byte[] b, int off, int len) {
+            // no-op
+        }
+    };
 
     //---------------------------------------------------------------------
     // Copy methods for java.io.InputStream / java.io.OutputStream
@@ -72,24 +86,22 @@ public abstract class Streams {
     public static long copy(InputStream in, OutputStream out, byte[] buffer) throws IOException {
         Objects.requireNonNull(in, "No InputStream specified");
         Objects.requireNonNull(out, "No OutputStream specified");
-        boolean success = false;
-        try {
-            long byteCount = 0;
-            int bytesRead;
-            while ((bytesRead = in.read(buffer)) != -1) {
-                out.write(buffer, 0, bytesRead);
-                byteCount += bytesRead;
-            }
-            out.flush();
-            success = true;
-            return byteCount;
-        } finally {
-            if (success) {
-                IOUtils.close(in, out);
-            } else {
-                IOUtils.closeWhileHandlingException(in, out);
-            }
+        // Leverage try-with-resources to close in and out so that exceptions in close() are either propagated or added as suppressed
+        // exceptions to the main exception
+        try (InputStream in2 = in; OutputStream out2 = out) {
+            return doCopy(in2, out2, buffer);
         }
+    }
+
+    private static long doCopy(InputStream in, OutputStream out, byte[] buffer) throws IOException {
+        long byteCount = 0;
+        int bytesRead;
+        while ((bytesRead = in.read(buffer)) != -1) {
+            out.write(buffer, 0, bytesRead);
+            byteCount += bytesRead;
+        }
+        out.flush();
+        return byteCount;
     }
 
     /**
@@ -103,14 +115,8 @@ public abstract class Streams {
     public static void copy(byte[] in, OutputStream out) throws IOException {
         Objects.requireNonNull(in, "No input byte array specified");
         Objects.requireNonNull(out, "No OutputStream specified");
-        try {
-            out.write(in);
-        } finally {
-            try {
-                out.close();
-            } catch (IOException ex) {
-                // do nothing
-            }
+        try (OutputStream out2 = out) {
+            out2.write(in);
         }
     }
 
@@ -131,25 +137,23 @@ public abstract class Streams {
     public static int copy(Reader in, Writer out) throws IOException {
         Objects.requireNonNull(in, "No Reader specified");
         Objects.requireNonNull(out, "No Writer specified");
-        boolean success = false;
-        try {
-            int byteCount = 0;
-            char[] buffer = new char[BUFFER_SIZE];
-            int bytesRead;
-            while ((bytesRead = in.read(buffer)) != -1) {
-                out.write(buffer, 0, bytesRead);
-                byteCount += bytesRead;
-            }
-            out.flush();
-            success = true;
-            return byteCount;
-        } finally {
-            if (success) {
-                IOUtils.close(in, out);
-            } else {
-                IOUtils.closeWhileHandlingException(in, out);
-            }
+        // Leverage try-with-resources to close in and out so that exceptions in close() are either propagated or added as suppressed
+        // exceptions to the main exception
+        try (Reader in2 = in; Writer out2 = out) {
+            return doCopy(in2, out2);
         }
+    }
+
+    private static int doCopy(Reader in, Writer out) throws IOException {
+        int byteCount = 0;
+        char[] buffer = new char[BUFFER_SIZE];
+        int bytesRead;
+        while ((bytesRead = in.read(buffer)) != -1) {
+            out.write(buffer, 0, bytesRead);
+            byteCount += bytesRead;
+        }
+        out.flush();
+        return byteCount;
     }
 
     /**
@@ -163,14 +167,8 @@ public abstract class Streams {
     public static void copy(String in, Writer out) throws IOException {
         Objects.requireNonNull(in, "No input String specified");
         Objects.requireNonNull(out, "No Writer specified");
-        try {
-            out.write(in);
-        } finally {
-            try {
-                out.close();
-            } catch (IOException ex) {
-                // do nothing
-            }
+        try (Writer out2 = out) {
+            out2.write(in);
         }
     }
 
@@ -220,6 +218,13 @@ public abstract class Streams {
         return read;
     }
 
+    /**
+     * Fully consumes the input stream, throwing the bytes away. Returns the number of bytes consumed.
+     */
+    public static long consumeFully(InputStream inputStream) throws IOException {
+        return copy(inputStream, NULL_OUTPUT_STREAM);
+    }
+
     public static List<String> readAllLines(InputStream input) throws IOException {
         final List<String> lines = new ArrayList<>();
         readAllLines(input, lines::add);
@@ -236,11 +241,44 @@ public abstract class Streams {
     }
 
     /**
+     * Wraps an {@link InputStream} such that it's {@code close} method becomes a noop
+     *
+     * @param stream {@code InputStream} to wrap
+     * @return wrapped {@code InputStream}
+     */
+    public static InputStream noCloseStream(InputStream stream) {
+        return new FilterInputStream(stream) {
+            @Override
+            public void close() {
+                // noop
+            }
+        };
+    }
+
+    /**
      * Wraps the given {@link BytesStream} in a {@link StreamOutput} that simply flushes when
      * close is called.
      */
     public static BytesStream flushOnCloseStream(BytesStream os) {
         return new FlushOnCloseOutputStream(os);
+    }
+
+    /**
+     * Reads all bytes from the given {@link InputStream} and closes it afterwards.
+     */
+    public static BytesReference readFully(InputStream in) throws IOException {
+        try (InputStream inputStream = in) {
+            BytesStreamOutput out = new BytesStreamOutput();
+            copy(inputStream, out);
+            return out.bytes();
+        }
+    }
+
+    /**
+     * Limits the given input stream to the provided number of bytes
+     */
+    public static InputStream limitStream(InputStream in, long limit) {
+        return new LimitedInputStream(in, limit);
     }
 
     /**
@@ -284,6 +322,79 @@ public abstract class Streams {
         @Override
         public BytesReference bytes() {
             return delegate.bytes();
+        }
+    }
+
+    /**
+     * A wrapper around an {@link InputStream} that limits the number of bytes that can be read from the stream.
+     */
+    static class LimitedInputStream extends FilterInputStream {
+
+        private static final long NO_MARK = -1L;
+
+        private long currentLimit; // is always non-negative
+        private long limitOnLastMark;
+
+        LimitedInputStream(InputStream in, long limit) {
+            super(in);
+            if (limit < 0L) {
+                throw new IllegalArgumentException("limit must be non-negative");
+            }
+            this.currentLimit = limit;
+            this.limitOnLastMark = NO_MARK;
+        }
+
+        @Override
+        public int read() throws IOException {
+            final int result;
+            if (currentLimit == 0 || (result = in.read()) == -1) {
+                return -1;
+            } else {
+                currentLimit--;
+                return result;
+            }
+        }
+
+        @Override
+        public int read(byte[] b, int off, int len) throws IOException {
+            final int result;
+            if (currentLimit == 0 || (result = in.read(b, off, Math.toIntExact(Math.min(len, currentLimit)))) == -1) {
+                return -1;
+            } else {
+                currentLimit -= result;
+                return result;
+            }
+        }
+
+        @Override
+        public long skip(long n) throws IOException {
+            final long skipped = in.skip(Math.min(n, currentLimit));
+            currentLimit -= skipped;
+            return skipped;
+        }
+
+        @Override
+        public int available() throws IOException {
+            return Math.toIntExact(Math.min(in.available(), currentLimit));
+        }
+
+        @Override
+        public void close() throws IOException {
+            in.close();
+        }
+
+        @Override
+        public synchronized void mark(int readlimit) {
+            in.mark(readlimit);
+            limitOnLastMark = currentLimit;
+        }
+
+        @Override
+        public synchronized void reset() throws IOException {
+            in.reset();
+            if (limitOnLastMark != NO_MARK) {
+                currentLimit = limitOnLastMark;
+            }
         }
     }
 }

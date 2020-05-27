@@ -18,9 +18,12 @@
  */
 package org.elasticsearch.index.mapper;
 
+import org.elasticsearch.Version;
+import org.elasticsearch.cluster.metadata.IndexMetadata;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.test.ESTestCase;
 
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -36,11 +39,71 @@ public class MapperMergeValidatorTests extends ESTestCase {
         FieldAliasMapper aliasMapper = new FieldAliasMapper("path", "some.path", "field");
 
         IllegalArgumentException e = expectThrows(IllegalArgumentException.class, () ->
-            MapperMergeValidator.validateMapperStructure(
+            MapperMergeValidator.validateNewMappers(
                 singletonList(objectMapper),
                 emptyList(),
-                singletonList(aliasMapper)));
+                singletonList(aliasMapper),
+                new FieldTypeLookup()));
         assertEquals("Field [some.path] is defined both as an object and a field.", e.getMessage());
+    }
+
+    public void testDuplicateFieldAliasAndConcreteField() {
+        FieldMapper field = new MockFieldMapper("field");
+        FieldMapper invalidField = new MockFieldMapper("invalid");
+        FieldAliasMapper invalidAlias = new FieldAliasMapper("invalid", "invalid", "field");
+
+        IllegalArgumentException e = expectThrows(IllegalArgumentException.class, () ->
+            MapperMergeValidator.validateNewMappers(
+                emptyList(),
+                Arrays.asList(field, invalidField),
+                singletonList(invalidAlias),
+                new FieldTypeLookup()));
+
+        assertEquals("Field [invalid] is defined both as an alias and a concrete field.", e.getMessage());
+    }
+
+    public void testAliasThatRefersToAlias() {
+        FieldMapper field = new MockFieldMapper("field");
+        FieldAliasMapper alias = new FieldAliasMapper("alias", "alias", "field");
+        FieldAliasMapper invalidAlias = new FieldAliasMapper("invalid-alias", "invalid-alias", "alias");
+
+        IllegalArgumentException e = expectThrows(IllegalArgumentException.class, () ->
+            MapperMergeValidator.validateNewMappers(
+                emptyList(),
+                singletonList(field),
+                Arrays.asList(alias, invalidAlias),
+                new FieldTypeLookup()));
+
+        assertEquals("Invalid [path] value [alias] for field alias [invalid-alias]: an alias" +
+            " cannot refer to another alias.", e.getMessage());
+    }
+
+    public void testAliasThatRefersToItself() {
+        FieldAliasMapper invalidAlias = new FieldAliasMapper("invalid-alias", "invalid-alias", "invalid-alias");
+
+        IllegalArgumentException e = expectThrows(IllegalArgumentException.class, () ->
+            MapperMergeValidator.validateNewMappers(
+                emptyList(),
+                emptyList(),
+                singletonList(invalidAlias),
+                new FieldTypeLookup()));
+
+        assertEquals("Invalid [path] value [invalid-alias] for field alias [invalid-alias]: an alias" +
+            " cannot refer to itself.", e.getMessage());
+    }
+
+    public void testAliasWithNonExistentPath() {
+        FieldAliasMapper invalidAlias = new FieldAliasMapper("invalid-alias", "invalid-alias", "non-existent");
+
+        IllegalArgumentException e = expectThrows(IllegalArgumentException.class, () ->
+            MapperMergeValidator.validateNewMappers(
+                emptyList(),
+                emptyList(),
+                singletonList(invalidAlias),
+                new FieldTypeLookup()));
+
+        assertEquals("Invalid [path] value [non-existent] for field alias [invalid-alias]: an alias" +
+            " must refer to an existing field in the mappings.", e.getMessage());
     }
 
     public void testFieldAliasWithNestedScope() {
@@ -102,15 +165,19 @@ public class MapperMergeValidatorTests extends ESTestCase {
         assertEquals(expectedMessage, e.getMessage());
     }
 
+    private static final Settings SETTINGS = Settings.builder()
+        .put(IndexMetadata.SETTING_INDEX_VERSION_CREATED.getKey(), Version.CURRENT)
+        .build();
+
     private static ObjectMapper createObjectMapper(String name) {
         return new ObjectMapper(name, name, true,
             ObjectMapper.Nested.NO,
-            ObjectMapper.Dynamic.FALSE, emptyMap(), Settings.EMPTY);
+            ObjectMapper.Dynamic.FALSE, emptyMap(), SETTINGS);
     }
 
     private static ObjectMapper createNestedObjectMapper(String name) {
         return new ObjectMapper(name, name, true,
             ObjectMapper.Nested.newNested(false, false),
-            ObjectMapper.Dynamic.FALSE, emptyMap(), Settings.EMPTY);
+            ObjectMapper.Dynamic.FALSE, emptyMap(), SETTINGS);
     }
 }

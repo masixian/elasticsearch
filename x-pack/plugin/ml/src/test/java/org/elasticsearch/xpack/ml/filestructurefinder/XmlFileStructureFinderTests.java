@@ -14,12 +14,12 @@ public class XmlFileStructureFinderTests extends FileStructureTestCase {
     private FileStructureFinderFactory factory = new XmlFileStructureFinderFactory();
 
     public void testCreateConfigsGivenGoodXml() throws Exception {
-        assertTrue(factory.canCreateFromSample(explanation, XML_SAMPLE));
+        assertTrue(factory.canCreateFromSample(explanation, XML_SAMPLE, 0.0));
 
         String charset = randomFrom(POSSIBLE_CHARSETS);
         Boolean hasByteOrderMarker = randomHasByteOrderMarker(charset);
         FileStructureFinder structureFinder = factory.createFromSample(explanation, XML_SAMPLE, charset, hasByteOrderMarker,
-            FileStructureOverrides.EMPTY_OVERRIDES, NOOP_TIMEOUT_CHECKER);
+            FileStructureFinderManager.DEFAULT_LINE_MERGE_SIZE_LIMIT, FileStructureOverrides.EMPTY_OVERRIDES, NOOP_TIMEOUT_CHECKER);
 
         FileStructure structure = structureFinder.getStructure();
 

@@ -22,24 +22,21 @@ package org.elasticsearch.search.query;
 import org.apache.lucene.search.FieldDoc;
 import org.apache.lucene.search.TotalHits;
 import org.elasticsearch.Version;
+import org.elasticsearch.common.io.stream.DelayableWriteable;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.lucene.search.TopDocsAndMaxScore;
 import org.elasticsearch.search.DocValueFormat;
 import org.elasticsearch.search.SearchPhaseResult;
 import org.elasticsearch.search.SearchShardTarget;
-import org.elasticsearch.search.aggregations.Aggregations;
+import org.elasticsearch.search.aggregations.InternalAggregation;
 import org.elasticsearch.search.aggregations.InternalAggregations;
-import org.elasticsearch.search.aggregations.pipeline.PipelineAggregator;
-import org.elasticsearch.search.aggregations.pipeline.SiblingPipelineAggregator;
+import org.elasticsearch.search.internal.SearchContextId;
 import org.elasticsearch.search.profile.ProfileShardResult;
 import org.elasticsearch.search.suggest.Suggest;
 
 import java.io.IOException;
-import java.util.List;
-import java.util.stream.Collectors;
 
-import static java.util.Collections.emptyList;
 import static org.elasticsearch.common.lucene.Lucene.readTopDocs;
 import static org.elasticsearch.common.lucene.Lucene.writeTopDocs;
 
@@ -52,9 +49,15 @@ public final class QuerySearchResult extends SearchPhaseResult {
     private TotalHits totalHits;
     private float maxScore = Float.NaN;
     private DocValueFormat[] sortValueFormats;
-    private InternalAggregations aggregations;
+    /**
+     * Aggregation results. We wrap them in
+     * {@linkplain DelayableWriteable} because
+     * {@link InternalAggregation} is usually made up of many small objects
+     * which have a fairly high overhead in the JVM. So we delay deserializing
+     * them until just before we need them.
+     */
+    private DelayableWriteable<InternalAggregations> aggregations;
     private boolean hasAggs;
-    private List<SiblingPipelineAggregator> pipelineAggregators;
     private Suggest suggest;
     private boolean searchTimedOut;
     private Boolean terminatedEarly = null;
@@ -63,23 +66,60 @@ public final class QuerySearchResult extends SearchPhaseResult {
     private long serviceTimeEWMA = -1;
     private int nodeQueueSize = -1;
 
+    private final boolean isNull;
+
     public QuerySearchResult() {
+        this(false);
     }
 
     public QuerySearchResult(StreamInput in) throws IOException {
-        readFrom(in);
+        super(in);
+        if (in.getVersion().onOrAfter(Version.V_7_7_0)) {
+            isNull = in.readBoolean();
+        } else {
+            isNull = false;
+        }
+        if (isNull == false) {
+            SearchContextId id = new SearchContextId(in);
+            readFromWithId(id, in);
+        }
     }
 
-    public QuerySearchResult(long id, SearchShardTarget shardTarget) {
-        this.requestId = id;
+    public QuerySearchResult(SearchContextId id, SearchShardTarget shardTarget) {
+        this.contextId = id;
         setSearchShardTarget(shardTarget);
+        isNull = false;
+    }
+
+    private QuerySearchResult(boolean isNull) {
+        this.isNull = isNull;
+    }
+
+    /**
+     * Returns an instance that contains no response.
+     */
+    public static QuerySearchResult nullInstance() {
+        return new QuerySearchResult(true);
+    }
+
+    /**
+     * Returns true if the result doesn't contain any useful information.
+     * It is used by the search action to avoid creating an empty response on
+     * shard request that rewrites to match_no_docs.
+     *
+     * TODO: Currently we need the concrete aggregators to build empty responses. This means that we cannot
+     *       build an empty response in the coordinating node so we rely on this hack to ensure that at least one shard
+     *       returns a valid empty response. We should move the ability to create empty responses to aggregation builders
+     *       in order to allow building empty responses directly from the coordinating node.
+     */
+    public boolean isNull() {
+        return isNull;
     }
 
     @Override
     public QuerySearchResult queryResult() {
         return this;
     }
-
 
     public void searchTimedOut(boolean searchTimedOut) {
         this.searchTimedOut = searchTimedOut;
@@ -158,18 +198,22 @@ public final class QuerySearchResult extends SearchPhaseResult {
      * Returns and nulls out the aggregation for this search results. This allows to free up memory once the aggregation is consumed.
      * @throws IllegalStateException if the aggregations have already been consumed.
      */
-    public Aggregations consumeAggs() {
+    public DelayableWriteable<InternalAggregations> consumeAggs() {
         if (aggregations == null) {
             throw new IllegalStateException("aggs already consumed");
         }
-        Aggregations aggs = aggregations;
+        DelayableWriteable<InternalAggregations> aggs = aggregations;
         aggregations = null;
         return aggs;
     }
 
     public void aggregations(InternalAggregations aggregations) {
-        this.aggregations = aggregations;
+        this.aggregations = aggregations == null ? null : DelayableWriteable.referencing(aggregations);
         hasAggs = aggregations != null;
+    }
+
+    public DelayableWriteable<InternalAggregations> aggregations() {
+        return aggregations;
     }
 
     /**
@@ -197,14 +241,6 @@ public final class QuerySearchResult extends SearchPhaseResult {
     public void profileResults(ProfileShardResult shardResults) {
         this.profileShardResults = shardResults;
         hasProfileResults = shardResults != null;
-    }
-
-    public List<SiblingPipelineAggregator> pipelineAggregators() {
-        return pipelineAggregators;
-    }
-
-    public void pipelineAggregators(List<SiblingPipelineAggregator> pipelineAggregators) {
-        this.pipelineAggregators = pipelineAggregators;
     }
 
     public Suggest suggest() {
@@ -265,21 +301,8 @@ public final class QuerySearchResult extends SearchPhaseResult {
         return hasScoreDocs || hasSuggestHits();
     }
 
-    public static QuerySearchResult readQuerySearchResult(StreamInput in) throws IOException {
-        QuerySearchResult result = new QuerySearchResult();
-        result.readFrom(in);
-        return result;
-    }
-
-    @Override
-    public void readFrom(StreamInput in) throws IOException {
-        super.readFrom(in);
-        long id = in.readLong();
-        readFromWithId(id, in);
-    }
-
-    public void readFromWithId(long id, StreamInput in) throws IOException {
-        this.requestId = id;
+    public void readFromWithId(SearchContextId id, StreamInput in) throws IOException {
+        this.contextId = id;
         from = in.readVInt();
         size = in.readVInt();
         int numSortFieldsPlus1 = in.readVInt();
@@ -293,10 +316,8 @@ public final class QuerySearchResult extends SearchPhaseResult {
         }
         setTopDocs(readTopDocs(in));
         if (hasAggs = in.readBoolean()) {
-            aggregations = InternalAggregations.readAggregations(in);
+            aggregations = DelayableWriteable.delayed(InternalAggregations::new, in);
         }
-        pipelineAggregators = in.readNamedWriteableList(PipelineAggregator.class).stream().map(a -> (SiblingPipelineAggregator) a)
-                .collect(Collectors.toList());
         if (in.readBoolean()) {
             suggest = new Suggest(in);
         }
@@ -304,20 +325,19 @@ public final class QuerySearchResult extends SearchPhaseResult {
         terminatedEarly = in.readOptionalBoolean();
         profileShardResults = in.readOptionalWriteable(ProfileShardResult::new);
         hasProfileResults = profileShardResults != null;
-        if (in.getVersion().onOrAfter(Version.V_6_0_0_beta1)) {
-            serviceTimeEWMA = in.readZLong();
-            nodeQueueSize = in.readInt();
-        } else {
-            serviceTimeEWMA = -1;
-            nodeQueueSize = -1;
-        }
+        serviceTimeEWMA = in.readZLong();
+        nodeQueueSize = in.readInt();
     }
 
     @Override
     public void writeTo(StreamOutput out) throws IOException {
-        super.writeTo(out);
-        out.writeLong(requestId);
-        writeToNoId(out);
+        if (out.getVersion().onOrAfter(Version.V_7_7_0)) {
+            out.writeBoolean(isNull);
+        }
+        if (isNull == false) {
+            contextId.writeTo(out);
+            writeToNoId(out);
+        }
     }
 
     public void writeToNoId(StreamOutput out) throws IOException {
@@ -332,13 +352,7 @@ public final class QuerySearchResult extends SearchPhaseResult {
             }
         }
         writeTopDocs(out, topDocsAndMaxScore);
-        if (aggregations == null) {
-            out.writeBoolean(false);
-        } else {
-            out.writeBoolean(true);
-            aggregations.writeTo(out);
-        }
-        out.writeNamedWriteableList(pipelineAggregators == null ? emptyList() : pipelineAggregators);
+        out.writeOptionalWriteable(aggregations);
         if (suggest == null) {
             out.writeBoolean(false);
         } else {
@@ -348,10 +362,8 @@ public final class QuerySearchResult extends SearchPhaseResult {
         out.writeBoolean(searchTimedOut);
         out.writeOptionalBoolean(terminatedEarly);
         out.writeOptionalWriteable(profileShardResults);
-        if (out.getVersion().onOrAfter(Version.V_6_0_0_beta1)) {
-            out.writeZLong(serviceTimeEWMA);
-            out.writeInt(nodeQueueSize);
-        }
+        out.writeZLong(serviceTimeEWMA);
+        out.writeInt(nodeQueueSize);
     }
 
     public TotalHits getTotalHits() {

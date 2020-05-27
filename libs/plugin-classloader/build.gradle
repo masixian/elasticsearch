@@ -17,8 +17,8 @@
  * under the License.
  */
 
-unitTest.enabled = false
+test.enabled = false
 
 // test depend on ES core...
-forbiddenApisMain.enabled = false
+disableTasks('forbiddenApisMain')
 jarHell.enabled = false

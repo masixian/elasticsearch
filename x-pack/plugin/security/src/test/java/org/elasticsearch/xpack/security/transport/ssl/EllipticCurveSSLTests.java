@@ -9,6 +9,7 @@ import org.elasticsearch.action.admin.cluster.node.info.NodesInfoResponse;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.transport.TransportAddress;
 import org.elasticsearch.test.SecurityIntegTestCase;
+import org.elasticsearch.transport.TransportInfo;
 import org.elasticsearch.xpack.core.ssl.CertParsingUtils;
 import org.elasticsearch.xpack.core.ssl.PemUtils;
 import org.junit.BeforeClass;
@@ -33,38 +34,26 @@ import java.util.Collections;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.is;
 
 public class EllipticCurveSSLTests extends SecurityIntegTestCase {
+     private static String CURVE;
 
     @Override
     protected Settings nodeSettings(int nodeOrdinal) {
-        final Path keyPath = getDataPath("/org/elasticsearch/xpack/security/transport/ssl/certs/simple/prime256v1-key.pem");
-        final Path certPath = getDataPath("/org/elasticsearch/xpack/security/transport/ssl/certs/simple/prime256v1-cert.pem");
+        final Path keyPath = getDataPath("/org/elasticsearch/xpack/security/transport/ssl/certs/simple/private_" + CURVE + ".pem");
+        final Path certPath = getDataPath("/org/elasticsearch/xpack/security/transport/ssl/certs/simple/certificate_" + CURVE + ".pem");
         return Settings.builder()
-                .put(super.nodeSettings(nodeOrdinal).filter(s -> s.startsWith("xpack.security.transport.ssl") == false))
-                .put("xpack.security.transport.ssl.enabled", true)
-                .put("xpack.security.transport.ssl.key", keyPath)
-                .put("xpack.security.transport.ssl.certificate", certPath)
-                .put("xpack.security.transport.ssl.certificate_authorities", certPath)
-                // disable hostname verificate since these certs aren't setup for that
-                .put("xpack.security.transport.ssl.verification_mode", "certificate")
-                .build();
-    }
-
-    @Override
-    protected Settings transportClientSettings() {
-        final Path keyPath = getDataPath("/org/elasticsearch/xpack/security/transport/ssl/certs/simple/prime256v1-key.pem");
-        final Path certPath = getDataPath("/org/elasticsearch/xpack/security/transport/ssl/certs/simple/prime256v1-cert.pem");
-        return Settings.builder()
-                .put(super.transportClientSettings().filter(s -> s.startsWith("xpack.security.transport.ssl") == false))
-                .put("xpack.security.transport.ssl.enabled", true)
-                .put("xpack.security.transport.ssl.key", keyPath)
-                .put("xpack.security.transport.ssl.certificate", certPath)
-                .put("xpack.security.transport.ssl.certificate_authorities", certPath)
-                // disable hostname verificate since these certs aren't setup for that
-                .put("xpack.security.transport.ssl.verification_mode", "certificate")
-                .build();
+            .put(super.nodeSettings(nodeOrdinal).filter(s -> s.startsWith("xpack.security.transport.ssl") == false))
+            .put("xpack.security.transport.ssl.enabled", true)
+            .put("xpack.security.transport.ssl.key", keyPath)
+            .put("xpack.security.transport.ssl.certificate", certPath)
+            .put("xpack.security.transport.ssl.certificate_authorities", certPath)
+            // disable hostname verificate since these certs aren't setup for that
+            .put("xpack.security.transport.ssl.verification_mode", "certificate")
+            .build();
     }
 
     @Override
@@ -73,18 +62,19 @@ public class EllipticCurveSSLTests extends SecurityIntegTestCase {
     }
 
     public void testConnection() throws Exception {
-        final Path keyPath = getDataPath("/org/elasticsearch/xpack/security/transport/ssl/certs/simple/prime256v1-key.pem");
-        final Path certPath = getDataPath("/org/elasticsearch/xpack/security/transport/ssl/certs/simple/prime256v1-cert.pem");
+        assumeFalse("Fails on BCTLS with 'Closed engine without receiving the close alert message.'", inFipsJvm());
+        final Path keyPath = getDataPath("/org/elasticsearch/xpack/security/transport/ssl/certs/simple/private_" + CURVE + ".pem");
+        final Path certPath = getDataPath("/org/elasticsearch/xpack/security/transport/ssl/certs/simple/certificate_" + CURVE + ".pem");
         PrivateKey privateKey = PemUtils.readPrivateKey(keyPath, () -> null);
-        Certificate[] certs = CertParsingUtils.readCertificates(Collections.singletonList(certPath.toString()), null);
+        Certificate[] certs = CertParsingUtils.readCertificates(Collections.singletonList(certPath.toString()), newEnvironment());
         X509ExtendedKeyManager x509ExtendedKeyManager = CertParsingUtils.keyManager(certs, privateKey, new char[0]);
         SSLContext sslContext = SSLContext.getInstance("TLS");
-        sslContext.init(new X509ExtendedKeyManager[] { x509ExtendedKeyManager },
+        sslContext.init(new X509ExtendedKeyManager[]{x509ExtendedKeyManager},
             new TrustManager[]{CertParsingUtils.trustManager(CertParsingUtils.readCertificates(Collections.singletonList(certPath)))},
             new SecureRandom());
         SSLSocketFactory socketFactory = sslContext.getSocketFactory();
         NodesInfoResponse response = client().admin().cluster().prepareNodesInfo().setTransport(true).get();
-        TransportAddress address = randomFrom(response.getNodes()).getTransport().getAddress().publishAddress();
+        TransportAddress address = randomFrom(response.getNodes()).getInfo(TransportInfo.class).getAddress().publishAddress();
 
         final CountDownLatch latch = new CountDownLatch(1);
         try (SSLSocket sslSocket = AccessController.doPrivileged(new PrivilegedExceptionAction<SSLSocket>() {
@@ -106,12 +96,14 @@ public class EllipticCurveSSLTests extends SecurityIntegTestCase {
             Certificate[] peerChain = session.getPeerCertificates();
             assertEquals(1, peerChain.length);
             assertEquals(certs[0], peerChain[0]);
-            assertThat(session.getCipherSuite(), containsString("ECDSA"));
+            assertThat(session.getCipherSuite(),
+                anyOf(containsString("ECDSA"), is("TLS_AES_256_GCM_SHA384"), is("TLS_AES_128_GCM_SHA256")));
         }
     }
 
     @BeforeClass
     public static void assumeECDSACiphersSupported() throws Exception {
+        CURVE = randomFrom("secp256r1", "secp384r1", "secp521r1");
         SSLContext sslContext = SSLContext.getInstance("TLSv1.2");
         sslContext.init(null, null, null);
         SSLEngine sslEngine = sslContext.createSSLEngine();

@@ -56,7 +56,7 @@ public abstract class Mapper implements ToXContentFragment, Iterable<Mapper> {
         }
     }
 
-    public abstract static class Builder<T extends Builder, Y extends Mapper> {
+    public abstract static class Builder<T extends Builder> {
 
         public String name;
 
@@ -71,16 +71,12 @@ public abstract class Mapper implements ToXContentFragment, Iterable<Mapper> {
         }
 
         /** Returns a newly built mapper. */
-        public abstract Y build(BuilderContext context);
+        public abstract Mapper build(BuilderContext context);
     }
 
     public interface TypeParser {
 
         class ParserContext {
-
-            private final String type;
-
-            private final IndexAnalyzers indexAnalyzers;
 
             private final Function<String, SimilarityProvider> similarityLookupService;
 
@@ -92,11 +88,9 @@ public abstract class Mapper implements ToXContentFragment, Iterable<Mapper> {
 
             private final Supplier<QueryShardContext> queryShardContextSupplier;
 
-            public ParserContext(String type, IndexAnalyzers indexAnalyzers, Function<String, SimilarityProvider> similarityLookupService,
+            public ParserContext(Function<String, SimilarityProvider> similarityLookupService,
                                  MapperService mapperService, Function<String, TypeParser> typeParsers,
                                  Version indexVersionCreated, Supplier<QueryShardContext> queryShardContextSupplier) {
-                this.type = type;
-                this.indexAnalyzers = indexAnalyzers;
                 this.similarityLookupService = similarityLookupService;
                 this.mapperService = mapperService;
                 this.typeParsers = typeParsers;
@@ -104,12 +98,8 @@ public abstract class Mapper implements ToXContentFragment, Iterable<Mapper> {
                 this.queryShardContextSupplier = queryShardContextSupplier;
             }
 
-            public String type() {
-                return type;
-            }
-
             public IndexAnalyzers getIndexAnalyzers() {
-                return indexAnalyzers;
+                return mapperService.getIndexAnalyzers();
             }
 
             public SimilarityProvider getSimilarity(String name) {
@@ -139,22 +129,22 @@ public abstract class Mapper implements ToXContentFragment, Iterable<Mapper> {
             protected Function<String, SimilarityProvider> similarityLookupService() { return similarityLookupService; }
 
             public ParserContext createMultiFieldContext(ParserContext in) {
-                return new MultiFieldParserContext(in) {
-                    @Override
-                    public boolean isWithinMultiField() { return true; }
-                };
+                return new MultiFieldParserContext(in);
             }
 
             static class MultiFieldParserContext extends ParserContext {
                 MultiFieldParserContext(ParserContext in) {
-                    super(in.type(), in.indexAnalyzers, in.similarityLookupService(), in.mapperService(), in.typeParsers(),
+                    super(in.similarityLookupService(), in.mapperService(), in.typeParsers(),
                             in.indexVersionCreated(), in.queryShardContextSupplier());
                 }
+
+                @Override
+                public boolean isWithinMultiField() { return true; }
             }
 
         }
 
-        Mapper.Builder<?,?> parse(String name, Map<String, Object> node, ParserContext parserContext) throws MapperParsingException;
+        Mapper.Builder<?> parse(String name, Map<String, Object> node, ParserContext parserContext) throws MapperParsingException;
     }
 
     private final String simpleName;
@@ -174,7 +164,7 @@ public abstract class Mapper implements ToXContentFragment, Iterable<Mapper> {
     public abstract String name();
 
     /**
-     * Returns a name representing the the type of this mapper.
+     * Returns a name representing the type of this mapper.
      */
     public abstract String typeName();
 
@@ -182,10 +172,4 @@ public abstract class Mapper implements ToXContentFragment, Iterable<Mapper> {
      *  Both {@code this} and {@code mergeWith} will be left unmodified. */
     public abstract Mapper merge(Mapper mergeWith);
 
-    /**
-     * Update the field type of this mapper. This is necessary because some mapping updates
-     * can modify mappings across several types. This method must return a copy of the mapper
-     * so that the current mapper is not modified.
-     */
-    public abstract Mapper updateFieldType(Map<String, MappedFieldType> fullNameToFieldType);
 }

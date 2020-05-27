@@ -19,17 +19,15 @@
 
 package org.elasticsearch.monitor.os;
 
-import org.elasticsearch.Version;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
-import org.elasticsearch.common.io.stream.Writeable;
 import org.elasticsearch.common.unit.TimeValue;
-import org.elasticsearch.common.xcontent.ToXContentFragment;
 import org.elasticsearch.common.xcontent.XContentBuilder;
+import org.elasticsearch.node.ReportingService;
 
 import java.io.IOException;
 
-public class OsInfo implements Writeable, ToXContentFragment {
+public class OsInfo implements ReportingService.Info {
 
     private final long refreshInterval;
     private final int availableProcessors;
@@ -61,11 +59,7 @@ public class OsInfo implements Writeable, ToXContentFragment {
         this.availableProcessors = in.readInt();
         this.allocatedProcessors = in.readInt();
         this.name = in.readOptionalString();
-        if (in.getVersion().onOrAfter(Version.V_6_6_0)) {
-            this.prettyName = in.readOptionalString();
-        } else {
-            this.prettyName = null;
-        }
+        this.prettyName = in.readOptionalString();
         this.arch = in.readOptionalString();
         this.version = in.readOptionalString();
     }
@@ -76,9 +70,7 @@ public class OsInfo implements Writeable, ToXContentFragment {
         out.writeInt(availableProcessors);
         out.writeInt(allocatedProcessors);
         out.writeOptionalString(name);
-        if (out.getVersion().onOrAfter(Version.V_6_6_0)) {
-            out.writeOptionalString(prettyName);
-        }
+        out.writeOptionalString(prettyName);
         out.writeOptionalString(arch);
         out.writeOptionalString(version);
     }

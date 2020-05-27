@@ -15,6 +15,8 @@ import org.elasticsearch.common.util.concurrent.ThreadContext;
 import org.elasticsearch.common.util.set.Sets;
 import org.elasticsearch.env.TestEnvironment;
 import org.elasticsearch.license.XPackLicenseState;
+import org.elasticsearch.license.XPackLicenseState.Feature;
+import org.elasticsearch.script.ScriptService;
 import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.threadpool.TestThreadPool;
 import org.elasticsearch.threadpool.ThreadPool;
@@ -26,7 +28,7 @@ import org.elasticsearch.xpack.core.security.authc.RealmSettings;
 import org.elasticsearch.xpack.core.security.authc.kerberos.KerberosRealmSettings;
 import org.elasticsearch.xpack.core.security.support.Exceptions;
 import org.elasticsearch.xpack.core.security.user.User;
-import org.elasticsearch.xpack.security.authc.support.UserRoleMapper;
+import org.elasticsearch.xpack.core.security.authc.support.UserRoleMapper;
 import org.elasticsearch.xpack.security.authc.support.mapper.NativeRoleMappingStore;
 import org.elasticsearch.xpack.security.support.SecurityIndexManager;
 import org.junit.After;
@@ -82,12 +84,13 @@ public abstract class KerberosRealmTestCase extends ESTestCase {
         settings = buildKerberosRealmSettings(REALM_NAME,
             writeKeyTab(dir.resolve("key.keytab"), "asa").toString(), 100, "10m", true, randomBoolean());
         licenseState = mock(XPackLicenseState.class);
-        when(licenseState.isAuthorizationRealmAllowed()).thenReturn(true);
+        when(licenseState.isSecurityEnabled()).thenReturn(true);
+        when(licenseState.isAllowed(Feature.SECURITY_AUTHORIZATION_REALM)).thenReturn(true);
     }
 
     @After
     public void shutdown() throws InterruptedException {
-        resourceWatcherService.stop();
+        resourceWatcherService.close();
         terminate(threadPool);
     }
 
@@ -136,6 +139,7 @@ public abstract class KerberosRealmTestCase extends ESTestCase {
         return Settings.builder().put(realmSettings)
             .normalizePrefix(RealmSettings.realmSettingPrefix(identifier))
             .put(globalSettings)
+            .put(RealmSettings.getFullSettingKey(identifier, RealmSettings.ORDER_SETTING), 0)
             .build();
     }
 
@@ -146,7 +150,8 @@ public abstract class KerberosRealmTestCase extends ESTestCase {
         when(mockClient.threadPool()).thenReturn(threadPool);
         when(mockClient.settings()).thenReturn(settings);
 
-        final NativeRoleMappingStore store = new NativeRoleMappingStore(Settings.EMPTY, mockClient, mock(SecurityIndexManager.class));
+        final NativeRoleMappingStore store = new NativeRoleMappingStore(Settings.EMPTY, mockClient, mock(SecurityIndexManager.class),
+            mock(ScriptService.class));
         final NativeRoleMappingStore roleMapper = spy(store);
 
         doAnswer(invocation -> {
@@ -264,6 +269,7 @@ public abstract class KerberosRealmTestCase extends ESTestCase {
             .put(RealmSettings.getFullSettingKey(realmName, KerberosRealmSettings.CACHE_TTL_SETTING), cacheTTL)
             .put(RealmSettings.getFullSettingKey(realmName, KerberosRealmSettings.SETTING_KRB_DEBUG_ENABLE), enableDebugging)
             .put(RealmSettings.getFullSettingKey(realmName, KerberosRealmSettings.SETTING_REMOVE_REALM_NAME), removeRealmName)
+            .put(RealmSettings.getFullSettingKey(realmName, RealmSettings.ORDER_SETTING.apply(KerberosRealmSettings.TYPE)), 0)
             .put(globalSettings);
         return builder.build();
     }
